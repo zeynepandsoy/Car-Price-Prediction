@@ -1,0 +1,875 @@
+---
+jupyter:
+  kernelspec:
+    display_name: R
+    language: R
+    name: ir
+  language_info:
+    codemirror_mode: r
+    file_extension: .r
+    mimetype: text/x-r-source
+    name: R
+    pygments_lexer: r
+    version: 4.1.0
+  nbformat: 4
+  nbformat_minor: 5
+---
+
+::: {.cell .code execution_count="633"}
+``` {R}
+
+library(randomForest)
+library(xgboost)
+library(doSNOW)
+library(foreach)
+library(parallel)
+library(stringr)
+library(dplyr)
+library(rlang)
+library(tidyverse)
+library(relaimpo)
+library(ggplot2)
+library(rpart)
+library(ellipse)
+library(RColorBrewer)
+
+```
+
+
+``` {R}
+##UNDERSTAND THE DATA
+
+# load the csv data file
+car.df <- read.csv("Car_details_v3.csv")
+head(car.df)
+```
+
+
+
+``` {R}
+summary(car.df)
+# soe columns are of class 'character' hence descriptive statistics can't be observed, we must convert them to numerical
+#unique(car.df$name)
+```
+
+
+``` {R}
+# word function in stringr library helps us extract words from strings. Using it we covert each car type to their brand name)
+
+car.df$name <- word(car.df$name,1)
+
+#Plotting car name to check the distribution
+# include visualizations to check the distribution of target variable selling_price i.e. over years in TABLEAU
+
+# to see which car brands have the highest number of cars in the dataset we plot.. 
+ggplot(data = car.df, aes(x = name, fill = name)) +
+  geom_bar() + labs(x = 'Car Brand') + labs(title = "Bar Graph of Car Brand") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+#Highest numbers of cars fall into Maruti brand followed by Hyundai, Mahindra and Tata brands
+```
+```{r}
+#To visualize the distribution of of Selling Price plot a histogram
+ggplot(car.df, aes(x = selling_price)) + 
+  geom_histogram(aes(y=..density..), colour="black", fill="white")+
+  geom_density(alpha=.2, fill="blue")+  #fit a line to plot the distribution
+  labs(x='Selling Price ') + labs(title = "Histogram of Selling Price") +
+  scale_x_continuous(trans='log10') 
+```
+
+
+``` {R}
+# create a dataframe including top 10 records of cars in decreasing order of their selling price 
+
+car.df[order(car.df$selling_price, decreasing = TRUE)[1:10], c("name","year","selling_price")]
+```
+
+
+``` {R}
+# let's now plot a bar chart showing the top car brands by selling_price
+
+data <- car.df[order(car.df$selling_price, decreasing = TRUE)[1:10],]
+
+barplot(data$selling_price, names.arg=data$name, cex.names=0.7, xlab="Name of Car Brand", ylab="Selling Price")
+
+```
+
+
+``` {R}
+# We must compute correlations between different attributes as prediction models learned from highly correlated data may be less accurate and possibly generate misleading insights
+# Correlation is computed only between numerical variables, so we change all categorical variables to numeric. As character type cant be converted directly we first change them into factor. Also categorical variables must be stored in levels(as grouping variables) rather than numeric so we convert to factor
+
+car.df$fuel = factor(car.df$fuel,levels = c('CNG', 'Diesel', 'LPG','Petrol'),labels = c(1, 2, 3, 4))
+
+car.df$seller_type = factor(car.df$seller_type,levels = c('Dealer', 'Individual', 'Trustmark Dealer'),labels = c(1, 2, 3))
+
+
+car.df$transmission = factor(car.df$transmission,levels = c('Automatic', 'Manual'),labels = c(1, 2))
+
+car.df$owner = factor(car.df$owner,levels = c('First Owner', 'Second Owner', 'Third Owner','Fourth & Above Owner', 'Test Drive Car'),labels = c(1, 2, 3, 4, 5))
+
+#lets also covert brand names
+car.df$name <- as.factor(car.df$name) 
+
+car.df$seats <- as.numeric(car.df$seats)
+# Find the columns which are in type factor
+i <- sapply(car.df, is.factor)
+
+# Transform those factor columns to numeric
+car.df[i] <- lapply(car.df[i], as.numeric)
+
+# As we converted all numeric columns, we must process the remaining character columns by removing their character units using str_replace() from stringr library then changing them to numeric
+
+car.df$mileage <- str_replace(car.df$mileage, 'kmpl', '')
+car.df$mileage <- str_replace(car.df$mileage, 'km/kg', '')
+car.df$mileage <- as.numeric(car.df$mileage) 
+
+car.df$engine <- str_replace(car.df$engine, 'CC', '')
+car.df$engine <- as.numeric(car.df$engine)
+
+car.df$max_power <- str_replace(car.df$max_power, 'bhp', '')
+car.df$max_power <- as.numeric(car.df$max_power)
+
+# column torque is a complex combinations of letters, numbers and symbols, we eliminate it for simplicity
+car.df <- subset(car.df, select = -torque)
+#alternatively, car.df$torque <- NULL
+head(car.df)
+```
+
+
+``` {R}
+#to visuaise how values are distributed for different pairs of attributes using pair()we generate a scatter plot
+pairs(~ mileage + engine + max_power + seats, data = car.df, pch = ".")
+```
+
+
+``` {R}
+# cor() finds all correlation values for all pairs of attributes in our dataset
+cor(car.df ,use="complete.obs")
+```
+
+
+``` {R}
+
+#plot the correlation plot of all attributes
+options(repr.plot.height=10); my_colors=colorRampPalette(brewer.pal(5, "Spectral"))(100)
+
+data = cor(car.df, use = "complete.obs")
+ 
+plotcorr(data , col=my_colors[data*50+50], mar = c(0,0,0,0), cex.lab=0.7, type = "upper" , diag=FALSE)
+```
+
+
+``` {R}
+cortable <- cor(car.df, use = "complete.obs")
+
+for (c in colnames(cortable)){
+    cordf <- data.frame(attr = colnames(cortable), cor = cortable[colnames(cortable),c]);
+    cordf <- cordf[(abs(cordf$cor)> 0.4 & cordf$cor!=1) & c > as.character(cordf$attr),];
+    if (nrow(cordf)>1) {
+        cat(c, "\n----------\n");
+        print.data.frame(cordf, row.names=FALSE, digits=3);
+        cat("\n")
+        }
+    }
+# this correlation table shows relatively more correlated attributes (all attribute pairs with absolute correlations > 0.4)
+```
+
+``` {R}
+targetCol <- which(names(car.df)=="selling_price") 
+startCol <- which(names(car.df)=="name") 
+endCol <- which(names(car.df)=="seats")
+
+cor.selling_price <- cor(car.df[,c(targetCol, startCol:endCol)]
+                     ,use="complete.obs")[-1,"selling_price"]
+
+cor.selling_price.df <- data.frame(cor=cor.selling_price, abs.cor=abs(cor.selling_price), 
+                               row.names=names(cor.selling_price))
+
+cor.selling_price.df <- cor.selling_price.df[order(-cor.selling_price.df$abs.cor),]
+
+cor.selling_price.df 
+```
+
+
+``` {R}
+options(repr.plot.height=5)
+
+ggplot(cor.selling_price.df, aes(x=reorder(row.names(cor.selling_price.df),-abs.cor), y=cor, fill=cor)) +
+    geom_col() + ggtitle("Selling Price: Correlating Variables") + xlab("Variables") +
+    scale_fill_gradient(low="red", high="green") +
+    theme(axis.text.x=element_text(angle=-90, hjust=0))
+```
+
+
+``` {R}
+
+# Now we must deal with the missing values
+# countNAs counts the number of NAs for each attribute
+countNAs <- function(v){
+    sum(ifelse(is.na(v)|v == "",1,0))
+}
+
+car.countNAs <- sapply(car.df, countNAs)
+car.countNAs #count na values
+
+summary(car.df)
+#notice when we compary the mean and meadian of attributes selling_price, km_driven , their max values are uch larger indicating outliears
+```
+
+
+``` {R}
+# For those variables contain missing values, calculate the proportion of missing values.
+
+round(car.countNAs[car.countNAs != 0]/nrow(car.df),5)
+```
+
+
+``` {R}
+# Remove columns with missing proportions greater than 0.2. 
+# In other words, we keep the columns with missing value proportions smaller than or equal to 0.2.
+n <- which(car.countNAs/nrow(car.df) <= 0.2)
+car.df <- subset(car.df, select = n)
+```
+
+
+
+``` {R}
+# We define a function impute_data() to impute column means for the empty entries
+impute_data <- function(vec, mn){
+    ifelse(is.na(vec), mn, vec)
+}
+
+car.df$mileage <- impute_data(car.df$mileage, mean(car.df$mileage, na.rm=TRUE))
+car.df$engine <- impute_data(car.df$engine, mean(car.df$engine, na.rm=TRUE))
+car.df$max_power <- impute_data(car.df$max_power, mean(car.df$max_power, na.rm=TRUE))
+car.df$seats <- impute_data(car.df$seats, mean(car.df$seats, na.rm=TRUE))
+    
+summary(car.df)  #no NA's in summary statistics
+```
+
+
+``` {R}
+#INCLUDE MORE VISUALIZATIONS
+#We can see that selling price is highly correlated to max_power then transmission and name.
+# include them as predictors
+#Based on the p-value ... we can see that features such as fuel, owner, seats 
+#are not statistically significant so we can potentiall remove them to improve the accuracy of the model 
+```
+
+``` {R}
+#Split the dataset into a smaller training set, a validation set and a testing set
+# Find total number of rows in the data set.
+ntotal <- nrow(car.df)
+
+# Use 85% of the data to train the model (training set).
+ntrain <- round(ntotal * 0.85)
+
+# The remaining 15% of the data is the testing set
+ntest <- ntotal - ntrain
+
+# Suppose we would like to randomly split the data.
+set.seed(103)
+
+# generate row index of the training set.
+row.index <- sample(1:ntotal, ntrain)
+
+# set up training and testing set.
+train.df <- car.df[row.index,]
+test.df <- car.df[-row.index,]
+
+# Further, split the training set into a smaller training set and a validation set
+
+# Get the total numer of rows in the training data set.
+nrowTrain <- nrow(train.df)
+
+# Use 75% of the data to train the model (smaller training set).
+nrowSmallTrain <- round(nrowTrain*0.75)
+
+# The remaining 25% of the data is the validation set
+nrowvalid <- nrowTrain - nrowSmallTrain
+
+# Suppose we would like to randomly split the data.
+set.seed(103)
+
+# generate row index of the smaller training set.
+rowIndicesSmallTrain <- sample(1:nrowTrain, size = nrowSmallTrain, replace = FALSE) 
+smalltrain.df <- train.df[rowIndicesSmallTrain, ]
+valid.df <- train.df[-rowIndicesSmallTrain, ]
+```
+
+``` {R}
+nrow(smalltrain.df)
+nrow(valid.df)
+nrow(test.df)
+```
+
+
+``` {R}
+#now we must set up the error measurement function in order to later on compare the performance of generated models 
+#given that our target vsariable selling_price is a continuous random variable 
+#we will use RMSE; root mean squared error as we aim to spot and minimize large errors of our generated models and since errors are squared befored averaged RMSE allows this
+RMSE <- function(predictions, realizations){
+    sqrt(sum((predictions - realizations)^2)/length(predictions))
+}
+```
+
+``` {R}
+print(cbind(1: ncol(smalltrain.df),(colnames(smalltrain.df))))
+```
+
+
+``` {R}
+#set up parallel processing for random forest
+# Set up your multiple cores as separate workers and then make them a cluster.
+workers <- detectCores()
+cluster <- makeCluster(workers, type = "SOCK")
+registerDoSNOW(cluster)
+
+# how many workers(cores) do you have?
+workers
+```
+
+``` {R}
+##BY OUR VISUALIZATIONS AND CORRELATION TABLES NO ABSOLUTE CORRELATION ABOVE 0.75 WAS OBSERVED HENCE AS ALL VARIABLES
+#EXCLUDING SELINNG_PRICE CAN COULD BE POTENTIALLY GOOD PREDICTORS IN OUR MODELS SO WE KEEP ALL OF THEM 
+```
+
+
+``` {R}
+
+variablesSelected <- c(1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+
+# select above selected variables as predictors, and column 3; selling_price is the response variable
+#create new sets to build an insight model
+smalltrain.df.select <- smalltrain.df[,c(1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 3)]
+valid.df.select <- valid.df[,c(1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 3)]
+head(smalltrain.df.select)
+print(cbind(1: ncol(smalltrain.df.select),(colnames(smalltrain.df.select))))
+
+#create the sets for the predictors(x) and target variable(y)in training and validation set
+
+# Create xtrain, ytrain, xvalid, yvalid for random forest.
+xtrain <- smalltrain.df[,variablesSelected] #predictors
+
+# The variable "selling_price" is our target variable
+ytrain <- smalltrain.df$selling_price #response varible
+
+xvalid <- valid.df[,variablesSelected]
+yvalid <- valid.df$selling_price
+```
+
+
+
+``` {R}
+##LINEAR REGRESSION
+# As the target variable were trying to preeict; selling price is continuious we try to fit linear regression 
+#  lets fit our model with all predictors
+
+lr_mAll <- lm(selling_price ~ ., data = smalltrain.df)
+summary(lr_mAll)
+```
+```{r}
+# calculate relative importance using calc.relimp function in the library "relaimpo"
+
+relImportance <- calc.relimp(lr_mAll, type = "lmg", rela = F)  
+
+# Sort
+cat('Relative Importances: \n')
+importance_lr <- as.data.frame(sort(round(relImportance$lmg, 3), decreasing=TRUE))
+
+importance_lr
+```
+
+``` {R}
+# generate prdections in the validation set
+pred.lr_mAll <- predict(lr_mAll, valid.df)
+
+RMSE_error = RMSE(pred.lr_mAll, yvalid)
+
+model.results <- data.frame(RMSE_error, Model = "lr_mAll")
+
+model.results
+
+#error is high as fitting a line through a data with many observations including outliears is difficult
+plot(lr_mAll)
+```
+
+
+``` {R}
+#Using our selected list of predictors build a new linear regression model where we exlude owner, mileage seat, name (least important 4 variables)
+lr_mInsight <- lm(selling_price ~ ., data = smalltrain.df.select[,-c(1, 7, 8, 11)])
+summary(lr_mInsight)
+```
+```{r}
+
+```
+
+``` {R}
+# calculate relative importance
+relImportance <- calc.relimp(lr_mInsight, type = "lmg", rela = F)  
+
+# Sort
+cat('Relative Importances: \n')
+importance_lr <- as.data.frame(sort(round(relImportance$lmg, 3), decreasing=TRUE))
+
+importance_lr
+```
+
+``` {R}
+# generate prdections in the validation set also exluding selecting columns 
+pred.lr_mInsight <- predict(lr_mInsight, valid.df.select[,-c(1, 7, 8, 11)])
+
+RMSE_error <- RMSE(pred.lr_mInsight, yvalid)  #larger error so in our final linear model we keep all preeictor 
+
+model.results <- rbind(model.results, data.frame(RMSE_error, Model="lr_mInsight"))
+
+model.results
+```
+
+
+```{r}
+#although these errors are relatively high and better models will be considered we can generate a scatter plot our our predictions for lr_mAll compared with the true label 
+plot(valid.df$selling_price, pred.lr_mAll, main="Scatterplot", col = c("red","blue"), xlab = "Actual Selling Price", ylab = "Predicted Selling Price")
+```
+```{r}
+##BUILD FIRST MODEL: REGRESSION TREE
+# Train regression tree model with all predictors
+#compleixity parameter control the split of each node in the regression.
+#tune de complexity parameter lower for lower error
+reg.tree <- rpart(selling_price ~ ., data = smalltrain.df.select, 
+                  control = rpart.control(cp = 0.0000001))
+```
+```{r}
+#print variable importance
+reg.tree$variable.importance
+```
+```{r}
+# Generate predictions in the validation set
+reg.tree.pred <- predict(reg.tree,valid.df.select)
+```
+```{r}
+#calculate error
+RMSE(reg.tree.pred, yvalid)
+```
+
+
+```{r}
+# Train regression tree model with eliminated least important column (column6, transmission)
+
+reg.tree2 <- rpart(selling_price ~ ., data = smalltrain.df.select[,-6], 
+                  control = rpart.control(cp = 0.0000001))
+
+#print variable importance
+reg.tree2$variable.importance
+```
+```{r}
+# Generate predictions in the validation set
+reg.tree.pred2 <- predict(reg.tree2,valid.df.select[,-6])
+```
+```{r}
+#calculate error
+RMSE(reg.tree.pred2, yvalid) 
+#eliminating least important column did not increase model performance so we keep it
+```
+```{r}
+#try applying log transformation on target variable and keep all predictors
+
+reg.tree3 <- rpart(log(selling_price) ~ ., data = smalltrain.df.select, 
+                  control = rpart.control(cp = 0.0000001))
+```
+```{r}
+#print variable importance
+reg.tree3$variable.importance
+```
+```{r}
+# Generate predictions in the validation set
+reg.tree.pred3 <- predict(reg.tree3,valid.df.select)
+reg.tree.pred3 <- exp(reg.tree.pred3) #convert back to normal scale
+
+```
+```{r}
+#calculate error
+error_m1 = RMSE(reg.tree.pred3, yvalid) 
+#applying log transformation on target variable reduced the error. Hence our best regression tree model is with all predictors and with log transformed target variable
+#Let's create a table to fit in our best models
+
+model.result <- data.frame(Model_No = 1 , Model = "Regression Tree", RMSE_valid = error_m1)
+
+model.result
+
+```
+
+
+```{r}
+# 500trees in total to work on 
+# 'mtry' defines how many columns (features) you want to select for each trees 
+
+#we specify that we want to use the combine function from randomForest library and not dplyr
+rf.parallel_m1 <- foreach(ntreePerWorker = rep(ceiling(500/workers), workers), .combine=randomForest::combine, .multicombine=TRUE, .inorder=FALSE, .packages = c("randomForest")) %dopar% {
+randomForest(xtrain, ytrain, ntree = ntreePerWorker, mtry = 3, nodesize = 4, importance = TRUE,set.seed(103, "L'Ecuyer"))
+}
+
+# plot the importance of each variable.
+varImpPlot(rf.parallel_m1, type = 1)  #lets try to improve model perf by eliminating least important variable
+
+# predict from the model
+rf.parallel.pred_m1 <- predict(rf.parallel_m1, xvalid)
+
+# calculate RMSE
+error_m2 = RMSE(rf.parallel.pred_m1, yvalid)
+
+model.result <- rbind(model.result, data.frame(Model_No = 2 , Model = "randomForest", RMSE_valid = error_m2))
+
+model.result
+
+print(cbind(1: ncol(xtrain),(colnames(xtrain))))
+
+```
+
+```{r}
+#build another random forest model eliminating least important feature; fuel
+#that is column 4
+rf.parallel_m2 <- foreach(ntreePerWorker = rep(ceiling(500/workers), workers), .combine=randomForest::combine, .multicombine=TRUE, .inorder=FALSE, .packages = c("randomForest")) %dopar% {
+randomForest(xtrain[,-c(4)], ytrain, ntree = ntreePerWorker, mtry = 3, nodesize = 4, importance = TRUE,set.seed(103, "L'Ecuyer"))
+}
+
+# plot the importance of each variable.
+varImpPlot(rf.parallel_m2, type = 1)  #lets try to improve model perf by eliminating least important variable
+
+# predict from the model
+rf.parallel.pred_m2 <- predict(rf.parallel_m2, xvalid[,-c(4)])
+
+# calculate RMSE
+RMSE(rf.parallel.pred_m2, yvalid) 
+#by eliminating the variable fuel we did not improve model performance so we 
+#keep it
+
+```
+```{r}
+#fit another random forest model with log-transformed price data
+ptm <- proc.time()
+rf.parallel_final <- foreach(ntreePerWorker = rep(ceiling(500/workers), workers), .combine=randomForest::combine, .multicombine=TRUE, .inorder=FALSE, .packages = c("randomForest")) %dopar% {
+  randomForest(xtrain, log(ytrain), ntree = ntreePerWorker, mtry = 3, nodesize = 4, importance = TRUE, set.seed(103, "L'Ecuyer"))
+}
+proc.time() - ptm # How much time does it take to fit a random forest?
+
+# predict from the model
+rf.parallel.pred_final <- predict(rf.parallel_final, xvalid)
+
+# remember to convert the log-transformation back before calculating RMSLE
+rf.parallel.pred_final <- exp(rf.parallel.pred_final)
+RMSE(rf.parallel.pred_final, yvalid)
+# The RMSE is higher than our initial model hence out best model is the model with all predictors and without log-transofmred price data 
+```
+
+``` {R}
+##MODEL XGBOOST
+
+# xgBoost only works with numerics.
+
+#Convert predictor columns to matrix
+xtrain.xgb <- model.matrix(~ 0 + ., data = xtrain)  
+#Convert target column to vector
+ytrain.xgb <- as.vector(ytrain)
+
+#same for validation set
+xvalid.xgb <- model.matrix(~ 0 + ., data = xvalid)  
+yvalid.xgb <- as.vector(yvalid)
+
+
+
+```
+
+``` {R}
+#first model includes all predictors
+xgb_m1 <- xgboost(xtrain.xgb, ytrain.xgb, max.depth = 6, nthread = workers, nround = 500, objective = "reg:squarederror", verbose = 0)
+## Note: Tune the model above by increasing/decreasing the depth of each tree and/or the number of trees (nround).
+
+# Predict in the validation set
+xgb.pred_m1 <- predict(xgb_m1, xvalid.xgb)
+
+# calculate RMSE
+RMSE(xgb.pred_m1, yvalid.xgb) 
+```
+
+``` {R}
+# Print out the variable importance
+xgb.importance(colnames(xtrain.xgb), model = xgb_m1)
+print(cbind(1: ncol(xtrain.xgb),(colnames(xtrain.xgb))))
+```
+
+``` {R}
+# Remove the variable with lowest gain using their column index (column 5; seller_type), train the model
+xgb_m2 <- xgboost(xtrain.xgb[,-5], ytrain.xgb, max.depth = 6, nthread = workers, nround = 500, objective = "reg:squarederror", verbose = 0)
+
+# predict from the model
+xgb.pred_m2 <- predict(xgb_m2, xvalid.xgb[,-5])
+
+# calculate error
+RMSE(xgb.pred_m2, yvalid.xgb)
+
+# Print out the variable importance
+xgb.importance(colnames(xtrain.xgb)[-5], model = xgb_m2)
+
+colnames(xtrain.xgb)
+#as removing seller_type did not reduce the error and damaged model performance, we keep it 
+```
+
+
+``` {R}
+#now we try to fit a model to the log-transformed price data 
+# We use proc.time function to determine the time between its bounds
+ptm <- proc.time() 
+xgb_final <- xgboost(xtrain.xgb, log(ytrain.xgb), max.depth = 6, nthread = workers, nround = 500, objective = "reg:squarederror", verbose = 0)
+proc.time() - ptm 
+
+# predict from the model
+xgb.pred_final <- predict(xgb_final, xvalid.xgb)
+xgb.pred_final <- exp(xgb.pred_final) #convert back to normal scale
+
+# calculate RMSE
+error_m3 =RMSE(xgb.pred_final, yvalid.xgb)
+# Error decreased with the log-transformed data hence our best xgboost model is with all predictors and with log-transformed price data
+
+model.result <- rbind(model.result, data.frame(Model_No = 3 , Model = "xgBoost", RMSE_valid = error_m3))
+
+model.result
+```
+
+
+
+```{r}
+#OUR BEST MODELS
+#REGRESSION TREE -- reg.tree.pred3--M1 w1
+#RANDOM FOREST --rf.parallel.pred_m1 --M2  w2
+#XGBOOST -- xgb.pred_final ----M3  1-w1-w2
+
+```
+
+
+```{r}
+m1_weight <- seq(0.1,0.9,0.1) 
+m2_weight <- seq(0.1,0.9,0.1)
+
+# set up a matrix to store the RMSE errors
+RMSE_matrix <- matrix(0,9,9)
+for (i in 1:9) {  #if we denote m1_weight=w1, w1 have 9 choices
+    for (j in 1:9){  #if we denote m2_weight=w2, w2 have 9 choices
+        if (m2_weight[j]+ m1_weight[i] > 1) next
+        ensemble_pred <- m1_weight[i]*reg.tree.pred3 + m2_weight[j]*rf.parallel.pred_m1 + (1-m1_weight[i] - m2_weight[j])*xgb.pred_final
+        RMSE_matrix[i,j] <- RMSE(ensemble_pred, valid.df.select$selling_price)
+    }
+}
+```
+```{r}
+RMSE_matrix
+```
+```{r}
+# Find the element in the matrix corresponds to the lowest error
+which(RMSE_matrix == min(RMSE_matrix[RMSE_matrix > 0]), arr.ind = TRUE) 
+#hence the best weight combination is 0.1 for regression tree model, 0.3 for random forest model with parallel processing and 1-(0.1+0.3) = 0.6 for xgb model
+# The lowest RMSE achieved by the weighted average ensemble is 119072.7
+
+error_m4 = RMSE_matrix[1,3]
+model.result <- rbind(model.result, data.frame(Model_No = 4 , Model = "Weighted Average", RMSE_valid = error_m4))
+
+model.result
+```
+
+
+
+
+```{r}
+#ENSEMBLE-STACKING
+#train the base models in the small training set and generate predictions in the validation set
+```
+```{r}
+#train regression tree model
+M1 <- rpart(log(selling_price) ~ ., data = smalltrain.df.select, 
+                  control = rpart.control(cp = 0.0000001))
+M1.pred <- predict(M1,valid.df.select)
+M1.pred <- exp(M1.pred) #convert back to normal scale
+```
+```{r}
+
+
+M2 <- foreach(ntreePerWorker = rep(ceiling(500/workers), workers), .combine=randomForest::combine, .multicombine=TRUE, .inorder=FALSE, .packages = c("randomForest")) %dopar% {
+randomForest(xtrain, ytrain, ntree = ntreePerWorker, mtry = 3, nodesize = 4, importance = TRUE,set.seed(103, "L'Ecuyer"))
+}
+M2.pred <- predict(M2, xvalid)
+```
+```{r}
+#train xgboost model
+#xtrain.xgb <- model.matrix(~ 0 + ., data = xtrain)  
+#ytrain.xgb <- as.vector(ytrain)
+
+#xvalid.xgb <- model.matrix(~ 0 + ., data = xvalid) 
+#yvalid.xgb <- as.vector(yvalid)
+
+M3 <- xgboost(xtrain.xgb, log(ytrain), max.depth = 6, nthread = workers, nround = 500, objective = "reg:squarederror", verbose = 0)
+
+# predict from the model
+M3.pred <- predict(M3, xvalid.xgb)
+M3.pred <- exp(M3.pred) #convert back to normal scale
+
+```
+```{r}
+#Fit a stacker model to the predictions generated in last step
+
+# Construct the stacker dataframe in validation set
+stacker.df <- data.frame(selling_price = valid.df$selling_price, 
+                         M1.pred = M1.pred, 
+                         M2.pred = M2.pred,
+                         M3.pred = M3.pred)
+
+head(stacker.df)
+```
+```{r}
+# Train Stacker model 1: regression tree
+# Dependent variable is the DEFAULT_FLAG, independent variables are M1, M2, M3 predictions
+stackerModel_1 <- rpart(selling_price ~ ., 
+                        data = stacker.df,
+                        control = rpart.control(cp = 0.0004))
+```
+```{r}
+# Predict from stacker model 1 --- regression tree
+stacker.predict.rt <- predict(stackerModel_1, stacker.df[, -1])
+
+# Score the stacker model's prediction
+error_m5 = RMSE(stacker.predict.rt, valid.df.select$selling_price)
+
+model.result <- rbind(model.result, data.frame(Model_No = 5 , Model = "Stacking - Regression Tree", RMSE_valid = error_m5))
+
+model.result
+
+```
+
+
+
+
+
+```{r}
+#STACKING XGBOOST
+# Convert stacker.df to matrix format
+
+stacker.x.xgb <- model.matrix(~ 0 + ., data = stacker.df[,-1]) #Predictors(remove dependent variable)
+stacker.y.xgb <- as.vector(stacker.df[,1]) #(dependent variable(remove independent variables)
+
+stackerModel_2 <- xgboost(stacker.x.xgb, 
+                          stacker.y.xgb,
+                          max.depth = 6, 
+                          nthread = workers, 
+                          nround = 500,
+                          objective = "reg:squarederror",
+                          verbose = 0)
+
+# Different settings of max.depth and nround have been examined. 
+# max.depth = 6 and nround = 500 provide the highest Brier Skill Score
+```
+```{r}
+# Predict from stacker model 2 --- XGBoost, and calculate RMSE
+pred.variables.xgb <- model.matrix(~ 0 + ., data = stacker.df[, -1])
+
+stacker.pred.xgb <- predict(stackerModel_2, pred.variables.xgb)
+
+# Score the stacker model's prediction
+error_m6 = RMSE(stacker.pred.xgb, valid.df.select$selling_price) #overall best model performance 
+
+model.result <- rbind(model.result, data.frame(Model_No = 6 , Model = "Stacking - xgBoost", RMSE_valid = error_m6))
+
+model.result[order(model.result$RMSE_valid),]
+model.result
+
+```
+```{r}
+#Finally retrain the best model using the entire training set and generate predictions for the testing set
+# The stacking model fitted with xgBoost model with all predictors and log-transformed price data  gives the lowest RMSE error, we retrain it
+
+# Select all predictors we have previously selected as predictors. selling_price (column3)is the response variable. 
+
+
+xtrain_full <- train.df[,variablesSelected]
+ytrain_full <- train.df$selling_price
+
+xtest <- test.df[,variablesSelected]
+ytest <- test.df$selling_price
+
+
+train.df.select <- train.df[,c(1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 3)]
+xtrain.xgb_full <- model.matrix(~ 0 + ., data = train.df.select[,-12])
+ytrain.xgb_full <- as.vector(train.df.select$selling_price)
+
+test.df.select <- test.df[,c(1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 3)]
+xtest.xgb_ <- model.matrix(~ 0 + ., data = test.df.select[,-12])
+ytest.xgb <- as.vector(test.df.select$selling_price)
+
+```
+
+```{r}
+# Train base models using entire training set
+
+M1.trainAll <- rpart(log(selling_price) ~ .,
+                     data = train.df.select, control = rpart.control(cp=0.0000001))
+
+#train random forest model 
+
+M2.trainAll <- foreach(ntreePerWorker = rep(ceiling(500/workers), workers), .combine=randomForest::combine, .multicombine=TRUE, .inorder=FALSE, .packages = c("randomForest")) %dopar% {
+randomForest(xtrain_full, ytrain_full, ntree = ntreePerWorker, mtry = 3, nodesize = 4, importance = TRUE,set.seed(103, "L'Ecuyer"))
+}
+
+M3.trainAll <- xgboost(xtrain.xgb_full, ytrain.xgb_full, 
+                       max.depth = 6, 
+                       nthread = workers, 
+                       nround = 500, 
+                       objective = "reg:squarederror",
+                       verbose = 0)
+```
+```{r}
+# Generate predictions in the testing dataset using each of the base model
+M1.pred.test <- predict(M1.trainAll, test.df.select)
+M1.pred.test <- exp(M1.pred.test) #convert to normal scale
+M2.pred.test <- predict(M2.trainAll, test.df.select)
+M3.pred.test <- predict(M3.trainAll, xtest.xgb)
+
+```
+
+```{r}
+# Construct the stacker dataframe
+stacker.df <- data.frame(selling_price = test.df$selling_price, 
+                         M1.pred.test = M1.pred.test, 
+                         M2.pred.test = M2.pred.test,
+                         M3.pred.test = M3.pred.test)
+
+head(stacker.df)
+```
+```{r}
+# Train our best stacker model (stacker model 2 --- XGBoost)
+
+stacker.x.xgb <- model.matrix(~ 0 + ., data = stacker.df[,-1]) #Predictors(remove dependent variable)
+stacker.y.xgb <- as.vector(stacker.df[,1]) #(dependent variable(remove independent variables)
+
+stackerModel_2 <- xgboost(stacker.x.xgb, 
+                          stacker.y.xgb,
+                          max.depth = 6, 
+                          nthread = workers, 
+                          nround = 500,
+                          objective = "reg:squarederror",
+                          verbose = 0)
+
+```
+```{r}
+# Predict from our best model (stacker model 2 --- XGBoost)
+pred.variables <- stacker.df[, -1]
+pred.variables.xgb <- model.matrix(~ 0 + ., data = pred.variables)
+
+stacker.pred.xgb <- predict(stackerModel_2, pred.variables.xgb)
+
+# Calculate error for the stacker model's prediction (in testing set)
+RMSE(stacker.pred.xgb, test.df.select$selling_price)
+
+#plot(test.df.select$selling_price, stacker.pred.xgb, main = "Scatterplot", col = c("red","blue"), xlab = "Actual Selling Price", ylab = "Predicted Selling Price")+ geom_jitter() 
+```
+
+
+
+
